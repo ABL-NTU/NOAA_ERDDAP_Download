@@ -1,0 +1,125 @@
+#### Extracting OISST data from NOAA ####
+## Organisation: Aquatic Biochronology Laboratory, Nanyang Technological University, Singapore
+## Author: Ng Zhong Wang Clement
+## Date: 18/01/2022
+
+## Set working directory
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path)) 
+
+## Libraries 
+library(dplyr)  
+library(plyr)
+library(data.table)
+library(tidync) 
+
+library(rerddap) 
+library(lubridate) 
+library(ggplot2)
+
+####################################################################################################################################
+
+#### Downloading the data ####
+## The datasets and corresponding dataset ID can be viewed from the NOAA ERDDAP.  
+rerddap::info(datasetid = "ncdcOisst21Agg_LonPM180", url = "https://coastwatch.pfeg.noaa.gov/erddap/") 
+
+## The following function downloads and prepares data based on user provided start and end dates, and the longitude and latitude. 
+OISST_sub_dl <- function(time_df){
+  OISST_dat <- griddap(x = "ncdcOisst21Agg_LonPM180", 
+                       url = "https://coastwatch.pfeg.noaa.gov/erddap/", 
+                       time = c(time_df$start, time_df$end), 
+                       zlev = c(0, 0),
+                       latitude = c(0, 2),
+                       longitude = c(102, 105),
+                       fields = "sst")$data %>% 
+    mutate(time = as.Date(stringr::str_remove(time, "T00:00:00Z"))) %>% 
+    dplyr::rename(t = time, temp = sst) %>% 
+    select(lon, lat, t, temp) %>% 
+    na.omit()
+} 
+
+## dl_years specifies the years to download the OISST temperature data as there may be issues trying to download all the data at once. 
+## Note to check the temporal resolution of the data and the corresponding start and end dates. 
+dl_years <- data.frame(date_index = 1:5,
+                       start = as.Date(c("1982-01-01", "1990-01-01", 
+                                         "1998-01-01", "2006-01-01", "2014-01-01")),
+                       end = as.Date(c("1989-12-31", "1997-12-31", 
+                                       "2005-12-31", "2013-12-31", "2019-12-31")))
+
+## The following line creates a data frame with the environmental data downloaded from NOAA ERDDAP.
+## In this case, the data is Optimum Interpolation Sea Surface Temperature V2, from latitude 0 to 2, longitude of 102 to 105, and from 01/01/1982 to 31/12/2019, downloaded in five sets. 
+OISST_data <- dl_years %>% 
+  group_by(date_index) %>% 
+  group_modify(~OISST_sub_dl(.x)) %>% 
+  ungroup() %>% 
+  select(lon, lat, t, temp)
+
+####################################################################################################################################
+
+#### Data structure
+## We can use head() and str() to look at the data structure, min() and max() to identify the minimum and maximum SSTs, and unique() to identify the latitude and longitudes in which the data was collected from. 
+oisst_daily_sgp_data <- OISST_data
+head(oisst_daily_sgp_data) ; str(oisst_daily_sgp_data)
+min(oisst_daily_sgp_data$temp) ; max(oisst_daily_sgp_data$temp)
+unique(oisst_daily_sgp_data$lat) ; unique(oisst_daily_sgp_data$lon)
+
+## Calculate the average daily temperature of Singapore waters from 1982 to 2020 
+## The following line calculates the average temperature from the 0.25 km x 0.25 km boxes from around Singapore. 
+setDT(oisst_daily_sgp_data)[, av.temp := mean(temp), by = .(t)][] 
+
+## We can use the unique function to remove the duplicates in date data and the as.POSIXct() function to change the format of the data to Year, Month and Date. 
+oisst_daily_sgp_data <- unique(oisst_daily_sgp_data, by=c("t"))
+oisst_daily_sgp_data$Date <- as.POSIXct(oisst_daily_sgp_data$t, format="%Y-%m-%d")
+oisst_daily_sgp_data <-  subset(oisst_daily_sgp_data, select = -c(3, 4)) 
+oisst_daily_sgp_data$Site <- "Singapore"
+
+## Plot average daily temperature over time
+oisst_daily_sgp_data %>%
+  ggplot(mapping = aes(x=Date, y=av.temp))+
+  geom_line(size=0.5)+
+  geom_smooth(method = "lm", size=0.5, color = 'red')+
+  scale_y_continuous(name = "Average Daily Temperature (˚C)")+
+  theme_bw()
+
+## Calculate the within-site temperature variation 
+oisst_daily_sgp_data <- ddply(oisst_daily_sgp_data, .(Site), transform, wS.temp = scale(av.temp, scale=F))
+setcolorder(oisst_daily_sgp_data, c('Date', 'lon', 'lat', 'Site', 'av.temp', 'wS.temp'))
+
+## Plot daily temperature variation over time
+oisst_daily_sgp_data %>%
+  ggplot(mapping = aes(x=Date, y=wS.temp))+
+  geom_line(size=0.5)+
+  geom_smooth(method = "lm", size=0.5, color = 'red')+
+  scale_y_continuous(name = "Average Daily Temperature (˚C)")+
+  theme_bw()
+
+####################################################################################################################################
+
+## Create month and year variables for calculating average monthly and annual SST
+oisst_daily_sgp_data$month <- format(as.POSIXct(oisst_daily_sgp_data$t), "%Y-%m")
+oisst_daily_sgp_data$year <- format(as.POSIXct(oisst_daily_sgp_data$t), "%Y")
+
+oisst_monthly_sgp_data <-  subset(oisst_daily_sgp_data, select = -c(5))
+oisst_monthly_sgp_data$Site <- "Singapore"
+setcolorder(oisst_monthly_sgp_data, c('t', 'month', 'year', 'lon', 'lat', 'Site', 'temp'))
+
+## Calculate the average monthly temperature per month 
+setDT(oisst_monthly_sgp_data)[, av.monthtemp := mean(temp), by = .(month)][] 
+oisst_monthly_sgp_data <- unique(oisst_monthly_sgp_data, by=c("month"))
+oisst_monthly_sgp_data <-  subset(oisst_monthly_sgp_data, select = -c(7))
+
+oisst_monthly_sgp_data <- ddply(oisst_monthly_sgp_data, .(Site), transform, wS.monthtemp = scale(av.monthtemp, scale=F))
+setcolorder(oisst_monthly_sgp_data, c('t', 'month', 'year', 'lon', 'lat', 'Site', 'av.monthtemp', 'wS.monthtemp'))
+
+## Plot average monthly temperature over time
+oisst_monthly_sgp_data %>%
+  ggplot(mapping = aes(x=t, y=av.monthtemp))+
+  geom_line(size=0.5)+
+  geom_smooth(method = "lm", size=0.5, color = 'red')+
+  scale_y_continuous(name = "Average Monthly Temperature (˚C)")+
+  theme_bw()
+
+####################################################################################################################################
+
+save.image(file = "NOAA_OISST_code.RData") 
+
+#### End ####
